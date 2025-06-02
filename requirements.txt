@@ -1,0 +1,3 @@
+openai
+tqdm
+pydantic_ai
