@@ -1,10 +1,11 @@
-from openai import OpenAI
+from pydantic_ai import messages as ai_messages, Agent
+import asyncio
 import json
 import os
 from tqdm import tqdm
 import re
 import copy
-from utils import extract_planning, content_to_json, extract_code_from_content
+from utils import extract_planning, content_to_json, extract_code_from_content, to_model_messages, response_to_dict
 import argparse
 
 parser = argparse.ArgumentParser()
@@ -16,13 +17,14 @@ parser.add_argument('--output_dir',type=str, default="")
 parser.add_argument('--output_repo_dir',type=str, default="")
 
 args    = parser.parse_args()
-client = OpenAI(api_key = os.environ["OPENAI_API_KEY"])
 
 paper_name = args.paper_name
 gpt_version = args.gpt_version
 pdf_json_path = args.pdf_json_path
 output_dir = args.output_dir
 output_repo_dir = args.output_repo_dir
+
+agent = Agent(gpt_version)
 
 with open(pdf_json_path) as f:
     paper_json = json.load(f)
@@ -122,19 +124,11 @@ Next, you must write only the "{todo_file_name}".
     return write_msg
 
 
-def api_call(msg):
-    if "o3-mini" in gpt_version:
-        completion = client.chat.completions.create(
-            model=gpt_version, 
-            reasoning_effort="high",
-            messages=msg
-        )
-    else:
-        completion = client.chat.completions.create(
-            model=gpt_version, 
-            messages=msg
-        )
-    return completion
+async def api_call(msg):
+    user_prompt = msg[-1]['content']
+    model_messages = to_model_messages(msg[:-1])
+    result = await agent.run(user_prompt, message_history=model_messages)
+    return result.all_messages()[-1]
     
 
 # testing for checking
@@ -152,46 +146,57 @@ for todo_file_name in todo_file_lst:
     detailed_logic_analysis_dict[todo_file_name] = detailed_logic_analysis_response[0]['choices'][0]['message']['content']
 
 
-for todo_idx, todo_file_name in enumerate(tqdm(todo_file_lst)):
-    responses = []
-    trajectories = copy.deepcopy(code_msg)
+async def main():
+    for todo_idx, todo_file_name in enumerate(tqdm(todo_file_lst)):
+        responses = []
+        trajectories = copy.deepcopy(code_msg)
 
-    print(f"[CODING] {todo_file_name}")
+        print(f"[CODING] {todo_file_name}")
 
-    if todo_file_name == "config.yaml":
-        continue
+        if todo_file_name == "config.yaml":
+            continue
 
-    instruction_msg = get_write_msg(todo_file_name, detailed_logic_analysis_dict[todo_file_name], done_file_lst)
-    trajectories.extend(instruction_msg)
+        instruction_msg = get_write_msg(
+            todo_file_name,
+            detailed_logic_analysis_dict[todo_file_name],
+            done_file_lst,
+        )
+        trajectories.extend(instruction_msg)
 
-    completion = api_call(trajectories)
-    # print(completion.choices[0].message)
-    
-    # response
-    completion_json = json.loads(completion.model_dump_json())
-    responses.append(completion_json)
+        completion = await api_call(trajectories)
+        # print(completion)
 
-    # trajectories
-    message = completion.choices[0].message
-    trajectories.append({'role': message.role, 'content': message.content})
+        # response
+        completion_json = response_to_dict(completion)
+        responses.append(completion_json)
 
-    done_file_lst.append(todo_file_name)
+        # trajectories
+        content = ''.join(
+            part.content for part in completion.parts if isinstance(part, ai_messages.TextPart)
+        )
+        trajectories.append({'role': 'assistant', 'content': content})
 
-    # save
-    # save_dir_name = f"{paper_name}_repo"
-    os.makedirs(f'{output_repo_dir}', exist_ok=True)
-    save_todo_file_name = todo_file_name.replace("/", "_")
+        done_file_lst.append(todo_file_name)
 
-    # extract code save 
-    code = extract_code_from_content(message.content)
-    if len(code) == 0:
-        code = message.content 
+        # save
+        # save_dir_name = f"{paper_name}_repo"
+        os.makedirs(f'{output_repo_dir}', exist_ok=True)
+        save_todo_file_name = todo_file_name.replace("/", "_")
 
-    done_file_dict[todo_file_name] = code
-    if save_todo_file_name != todo_file_name:
-        todo_file_dir = '/'.join(todo_file_name.split("/")[:-1])
-        os.makedirs(f"{output_repo_dir}/{todo_file_dir}", exist_ok=True)
+        # extract code save
+        code = extract_code_from_content(content)
+        if len(code) == 0:
+            code = content
 
-    with open(f"{output_repo_dir}/{todo_file_name}", 'w') as f:
-        f.write(code)
+        done_file_dict[todo_file_name] = code
+        if save_todo_file_name != todo_file_name:
+            todo_file_dir = '/'.join(todo_file_name.split("/")[:-1])
+            os.makedirs(f"{output_repo_dir}/{todo_file_dir}", exist_ok=True)
+
+        with open(f"{output_repo_dir}/{todo_file_name}", 'w') as f:
+            f.write(code)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
     
