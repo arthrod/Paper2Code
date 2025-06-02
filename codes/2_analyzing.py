@@ -1,9 +1,10 @@
-from openai import OpenAI
+from pydantic_ai import messages as ai_messages, Agent
+import asyncio
 import json
 import os
 from tqdm import tqdm
 import re
-from utils import extract_planning, content_to_json
+from utils import extract_planning, content_to_json, to_model_messages, response_to_dict
 import copy
 
 import argparse
@@ -17,12 +18,13 @@ parser.add_argument('--output_dir',type=str, default="")
 
 args    = parser.parse_args()
 
-client = OpenAI(api_key = os.environ["OPENAI_API_KEY"])
 
 paper_name = args.paper_name
 gpt_version = args.gpt_version
 pdf_json_path = args.pdf_json_path
 output_dir = args.output_dir
+
+agent = Agent(gpt_version)
     
 with open(f'{pdf_json_path}') as f:
     paper_json = json.load(f)
@@ -105,51 +107,50 @@ You DON'T need to provide the actual code yet; focus on a thorough, clear analys
     return write_msg
 
 
-def api_call(msg):
-    if "o3-mini" in gpt_version:
-        completion = client.chat.completions.create(
-            model=gpt_version, 
-            reasoning_effort="high",
-            messages=msg
+async def api_call(msg):
+    user_prompt = msg[-1]['content']
+    model_messages = to_model_messages(msg[:-1])
+    result = await agent.run(user_prompt, message_history=model_messages)
+    return result.all_messages()[-1]
+
+async def main():
+    for todo_file_name in tqdm(todo_file_lst):
+        responses = []
+        trajectories = copy.deepcopy(analysis_msg)
+
+        print(f"[ANALYSIS] {todo_file_name}")
+        if todo_file_name == "config.yaml":
+            continue
+
+        if todo_file_name not in logic_analysis_dict:
+            # print(f"[DEBUG ANALYSIS] {paper_name} {todo_file_name} is not exist in the logic analysis")
+            logic_analysis_dict[todo_file_name] = ""
+
+        instruction_msg = get_write_msg(todo_file_name, logic_analysis_dict[todo_file_name])
+        trajectories.extend(instruction_msg)
+
+        completion = await api_call(trajectories)
+
+        # response
+        completion_json = response_to_dict(completion)
+        responses.append(completion_json)
+
+        # trajectories
+        content = ''.join(
+            part.content for part in completion.parts if isinstance(part, ai_messages.TextPart)
         )
-    else:
-        completion = client.chat.completions.create(
-            model=gpt_version, 
-            messages=msg
-        )
-    return completion
+        trajectories.append({'role': 'assistant', 'content': content})
 
-for todo_file_name in tqdm(todo_file_lst):
-    responses = []
-    trajectories = copy.deepcopy(analysis_msg)
+        done_file_lst.append(todo_file_name)
 
-    print(f"[ANALYSIS] {todo_file_name}")
-    if todo_file_name == "config.yaml":
-        continue
-    
-    if todo_file_name not in logic_analysis_dict:
-        # print(f"[DEBUG ANALYSIS] {paper_name} {todo_file_name} is not exist in the logic analysis")
-        logic_analysis_dict[todo_file_name] = ""
-        
-    instruction_msg = get_write_msg(todo_file_name, logic_analysis_dict[todo_file_name])
-    trajectories.extend(instruction_msg)
-        
-    completion = api_call(trajectories)
-    
-    # response
-    completion_json = json.loads(completion.model_dump_json())
-    responses.append(completion_json)
+        # save
+        todo_file_name = todo_file_name.replace("/", "_")
+        with open(f'{output_dir}/{todo_file_name}_simple_analysis_response.json', 'w') as f:
+            json.dump(responses, f)
 
-    # trajectories
-    message = completion.choices[0].message
-    trajectories.append({'role': message.role, 'content': message.content})
+        with open(f'{output_dir}/{todo_file_name}_simple_analysis_trajectories.json', 'w') as f:
+            json.dump(trajectories, f)
 
-    done_file_lst.append(todo_file_name)
 
-    # save
-    todo_file_name = todo_file_name.replace("/", "_") 
-    with open(f'{output_dir}/{todo_file_name}_simple_analysis_response.json', 'w') as f:
-        json.dump(responses, f)
-
-    with open(f'{output_dir}/{todo_file_name}_simple_analysis_trajectories.json', 'w') as f:
-        json.dump(trajectories, f)
+if __name__ == "__main__":
+    asyncio.run(main())

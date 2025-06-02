@@ -1,8 +1,10 @@
-from openai import OpenAI
+from pydantic_ai import messages as ai_messages, Agent
+import asyncio
 import json
 from tqdm import tqdm
 import argparse
 import os
+from utils import to_model_messages, response_to_dict
 
 parser = argparse.ArgumentParser()
 
@@ -13,12 +15,13 @@ parser.add_argument('--output_dir',type=str, default="")
 
 args    = parser.parse_args()
 
-client = OpenAI(api_key = os.environ["OPENAI_API_KEY"])
 
 paper_name = args.paper_name
 gpt_version = args.gpt_version
 pdf_json_path = args.pdf_json_path
 output_dir = args.output_dir
+
+agent = Agent(gpt_version)
 
 with open(f'{pdf_json_path}') as f:
     paper_json = json.load(f)
@@ -199,52 +202,49 @@ training:
 """
     }]
 
-def api_call(msg, gpt_version):
-    if "o3-mini" in gpt_version:
-        completion = client.chat.completions.create(
-            model=gpt_version, 
-            reasoning_effort="high",
-            messages=msg
+async def api_call(msg):
+    user_prompt = msg[-1]['content']
+    model_messages = to_model_messages(msg[:-1])
+    result = await agent.run(user_prompt, message_history=model_messages)
+    return result.all_messages()[-1]
+
+async def main():
+    responses = []
+    trajectories = []
+
+    for idx, instruction_msg in enumerate([plan_msg, file_list_msg, task_list_msg, config_msg]):
+        if idx == 0:
+            print(f"[Planning] Overall plan")
+        elif idx == 1:
+            print(f"[Planning] Architecture design")
+        elif idx == 2:
+            print(f"[Planning] Logic design")
+        elif idx == 3:
+            print(f"[Planning] Configuration file generation")
+
+        trajectories.extend(instruction_msg)
+
+        completion = await api_call(trajectories)
+
+        # response
+        completion_json = response_to_dict(completion)
+        responses.append(completion_json)
+
+        # trajectories
+        content = ''.join(
+            part.content for part in completion.parts if isinstance(part, ai_messages.TextPart)
         )
-    else:
-        completion = client.chat.completions.create(
-            model=gpt_version, 
-            messages=msg
-        )
+        trajectories.append({'role': 'assistant', 'content': content})
 
-    return completion 
+    # save
+    os.makedirs(output_dir, exist_ok=True)
 
-responses = []
-trajectories = []
+    with open(f'{output_dir}/planning_response.json', 'w') as f:
+        json.dump(responses, f)
 
-for idx, instruction_msg in enumerate([plan_msg, file_list_msg, task_list_msg, config_msg]):
-    if idx == 0 :
-        print(f"[Planning] Overall plan")
-    elif idx == 1:
-        print(f"[Planning] Architecture design")
-    elif idx == 2:
-        print(f"[Planning] Logic design")
-    elif idx == 3:
-        print(f"[Planning] Configuration file generation")
-        
-    trajectories.extend(instruction_msg)
-
-    completion = api_call(trajectories, gpt_version)
-    
-    # response
-    completion_json = json.loads(completion.model_dump_json())
-    responses.append(completion_json)
-
-    # trajectories
-    message = completion.choices[0].message
-    trajectories.append({'role': message.role, 'content': message.content})
+    with open(f'{output_dir}/planning_trajectories.json', 'w') as f:
+        json.dump(trajectories, f)
 
 
-# save
-os.makedirs(output_dir, exist_ok=True)
-
-with open(f'{output_dir}/planning_response.json', 'w') as f:
-    json.dump(responses, f)
-
-with open(f'{output_dir}/planning_trajectories.json', 'w') as f:
-    json.dump(trajectories, f)
+if __name__ == "__main__":
+    asyncio.run(main())

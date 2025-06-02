@@ -103,3 +103,28 @@ def extract_code_from_content(content):
         return ""
     else:
         return code[0]
+
+
+def to_model_messages(messages_list):
+    """Convert OpenAI-style chat messages to pydantic_ai messages."""
+    from pydantic_ai import messages as ai_messages
+
+    model_messages = []
+    for m in messages_list:
+        role = m.get("role")
+        content = m.get("content", "")
+
+        if role == "system":
+            model_messages.append(ai_messages.ModelRequest(parts=[ai_messages.SystemPromptPart(content)]))
+        elif role == "user":
+            model_messages.append(ai_messages.ModelRequest.user_text_prompt(content))
+        elif role == "assistant":
+            model_messages.append(ai_messages.ModelResponse(parts=[ai_messages.TextPart(content)]))
+    return model_messages
+
+
+def response_to_dict(response):
+    """Serialize a pydantic_ai ModelResponse to a standard dictionary."""
+    import dataclasses
+
+    return dataclasses.asdict(response)
